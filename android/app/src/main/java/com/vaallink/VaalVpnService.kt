@@ -23,20 +23,20 @@ class VaalVpnService : VpnService() {
     companion object {
         private const val TAG = "VaalVpnService"
         const val VPN_REQUEST_CODE = 0x0F
-        private const val HEARTBEAT_INTERVAL = 5000L
+        private const val HEARTBEAT_INTERVAL = 3000L
+        private const val HEARTBEAT_TIMEOUT = 5000L
         private const val PREFS_NAME = "VpnConfigPrefs"
         private const val HEADER_SIZE = 7
 
         @Volatile
         var isActive: Boolean = false
 
-        @Volatile
-        var isConnected: Boolean = false
+        val isConnected = AtomicBoolean(false)
 
         fun broadcastStatus(context: Context) {
             val intent = Intent("com.vaallink.VPN_STATUS").apply {
                 putExtra("active", isActive)
-                putExtra("connected", isConnected)
+                putExtra("connected", isConnected.get())
             }
             context.sendBroadcast(intent)
         }
@@ -55,14 +55,13 @@ class VaalVpnService : VpnService() {
     private var role: String = ""
     private var sessionCode: String = ""
     private lateinit var relayAddr: InetAddress
-    private lateinit var backendAddr: InetAddress
     private lateinit var prefs: SharedPreferences
 
     override fun onCreate() {
         super.onCreate()
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         isActive = false
-        isConnected = false
+        isConnected.set(false)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -78,7 +77,6 @@ class VaalVpnService : VpnService() {
 
         try {
             relayAddr = InetAddress.getByName(relayServer)
-            backendAddr = InetAddress.getByName("192.168.0.137")
             startVpn()
         } catch (e: Exception) {
             Log.e(TAG, "DNS resolution failed: ${e.message}", e)
@@ -147,6 +145,7 @@ class VaalVpnService : VpnService() {
 
         val builder = Builder()
         builder.setSession("VaalLink VPN")
+        builder.setMtu(1500)
 
         try {
             builder.addDisallowedApplication(packageName)
@@ -155,39 +154,24 @@ class VaalVpnService : VpnService() {
             Log.e(TAG, "Failed to exclude app from VPN: ${e.message}")
         }
 
-        builder.addAddress("10.8.0.2", 24)
-
-        try {
-            builder.addRoute(backendAddr, 32)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to add route for backendAddr: ${e.message}")
-        }
-
-        try {
-            builder.addRoute("192.168.0.0", 16)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to add local network route: ${e.message}")
-        }
-
+        // Configure based on role
         if (role == "host") {
+            builder.addAddress("10.8.0.1", 24)
             try {
                 builder.addRoute(relayAddr, 32)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to add route for relayAddr: ${e.message}")
             }
         } else {
-            try {
-                builder.addRoute("0.0.0.0", 0)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to add default route: ${e.message}")
-            }
-            builder.addDnsServer("8.8.8.8")
-            builder.addDnsServer("8.8.4.4")
+            builder.addAddress("10.8.0.2", 24)
+            builder.addRoute("0.0.0.0", 0)  // Route ALL traffic through VPN
         }
 
+        // Add DNS servers
+        builder.addDnsServer("8.8.8.8")
+        builder.addDnsServer("8.8.4.4")
         builder.addDnsServer("1.1.1.1")
-        builder.addDnsServer("208.67.222.222")
-        builder.setMtu(1500)
+
         builder.setConfigureIntent(
             PendingIntent.getActivity(
                 this, 0,
@@ -212,7 +196,7 @@ class VaalVpnService : VpnService() {
 
         isRunning.set(true)
         isActive = true
-        isConnected = false
+        isConnected.set(false)
         broadcastStatus(this)
 
         udpThread = Thread { handleUdpTraffic() }.apply { start() }
@@ -220,25 +204,72 @@ class VaalVpnService : VpnService() {
         heartbeatThread = Thread { sendHeartbeats() }.apply { start() }
     }
 
+    private fun reconnectUdp() {
+        try {
+            udpChannel?.close()
+            udpChannel = DatagramChannel.open()
+            val relaySocketAddr = InetSocketAddress(relayAddr, udpPort)
+            udpChannel!!.connect(relaySocketAddr)
+            
+            // Re-register
+            val sessionBytes = sessionCode.toByteArray()
+            val registration = ByteArray(sessionBytes.size + 1).apply {
+                System.arraycopy(sessionBytes, 0, this, 0, sessionBytes.size)
+                this[sessionBytes.size] = if (role == "host") 1 else 0
+            }
+            udpChannel!!.write(ByteBuffer.wrap(registration))
+            Log.d(TAG, "UDP re-registration sent for session $sessionCode")
+        } catch (e: Exception) {
+            Log.e(TAG, "UDP reconnect failed: ${e.message}")
+        }
+    }
+
     private fun sendHeartbeats() {
+        val ackBuffer = ByteBuffer.allocate(1)
         while (isRunning.get()) {
             try {
                 if (udpChannel == null || !udpChannel!!.isOpen) {
-                    Thread.sleep(HEARTBEAT_INTERVAL)
+                    reconnectUdp()
+                    Thread.sleep(1000)
                     continue
                 }
+                
+                // Send heartbeat
                 val heartbeat = ByteArray(HEADER_SIZE).apply {
                     val codeBytes = sessionCode.toByteArray()
                     System.arraycopy(codeBytes, 0, this, 0, codeBytes.size.coerceAtMost(6))
                     this[6] = if (role == "host") 1 else 0
                 }
                 udpChannel!!.write(ByteBuffer.wrap(heartbeat))
-                Log.v(TAG, "Sent heartbeat")
+                
+                // Wait for ACK with timeout
+                ackBuffer.clear()
+                val startTime = System.currentTimeMillis()
+                var ackReceived = false
+                
+                while (System.currentTimeMillis() - startTime < HEARTBEAT_TIMEOUT) {
+                    if (udpChannel!!.read(ackBuffer) > 0) {
+                        ackReceived = true
+                        break
+                    }
+                    Thread.sleep(100)
+                }
+                
+                if (!ackReceived) {
+                    Log.w(TAG, "Heartbeat timeout")
+                    if (isConnected.get()) {
+                        isConnected.set(false)
+                        broadcastStatus(this@VaalVpnService)
+                    }
+                    reconnectUdp()
+                } else {
+                    Log.v(TAG, "Heartbeat ACK received")
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Heartbeat error: ${e.message}")
-                if (isConnected) {
-                    isConnected = false
-                    broadcastStatus(this)
+                if (isConnected.get()) {
+                    isConnected.set(false)
+                    broadcastStatus(this@VaalVpnService)
                 }
             }
 
@@ -274,38 +305,61 @@ class VaalVpnService : VpnService() {
                             val ackBytes = channel.read(ackBuffer)
                             if (ackBytes > 0) {
                                 Log.d(TAG, "UDP registration confirmed")
-                                isConnected = true
+                                isConnected.set(true)
                                 broadcastStatus(this@VaalVpnService)
                             } else {
                                 Log.e(TAG, "UDP registration ACK failed")
                             }
 
-                            val buffer = ByteBuffer.allocate(32767)
+                            val buffer = ByteBuffer.allocate(65535)
                             while (isRunning.get()) {
                                 // VPN -> Relay
                                 buffer.clear()
-                                val bytesRead = input.read(buffer.array())
+                                val bytesRead = try {
+                                    input.read(buffer.array())
+                                } catch (e: IOException) {
+                                    Log.e(TAG, "Input read error: ${e.message}")
+                                    -1
+                                }
+
                                 if (bytesRead > 0) {
                                     val packet = ByteArray(bytesRead + HEADER_SIZE).apply {
                                         System.arraycopy(sessionCode.toByteArray(), 0, this, 0, 6)
                                         this[6] = if (role == "host") 1 else 0
                                         System.arraycopy(buffer.array(), 0, this, HEADER_SIZE, bytesRead)
                                     }
-                                    channel.write(ByteBuffer.wrap(packet))
+                                    try {
+                                        channel.write(ByteBuffer.wrap(packet))
+                                    } catch (e: IOException) {
+                                        Log.e(TAG, "UDP write error: ${e.message}")
+                                        reconnectUdp()
+                                    }
                                 }
 
                                 // Relay -> VPN
                                 buffer.clear()
-                                val bytesReceived = channel.read(buffer)
+                                val bytesReceived = try {
+                                    channel.read(buffer)
+                                } catch (e: IOException) {
+                                    Log.e(TAG, "UDP read error: ${e.message}")
+                                    -1
+                                }
+
                                 if (bytesReceived > 0) {
                                     when {
                                         bytesReceived < HEADER_SIZE -> {
-                                            // Heartbeat or control packet, ignore
-                                            Log.v(TAG, "Received control packet ($bytesReceived bytes)")
+                                            // Control packet, ignore
                                         }
                                         else -> {
-                                            // Strip header and forward payload
-                                            output.write(buffer.array(), HEADER_SIZE, bytesReceived - HEADER_SIZE)
+                                            try {
+                                                output.write(
+                                                    buffer.array(), 
+                                                    HEADER_SIZE, 
+                                                    bytesReceived - HEADER_SIZE
+                                                )
+                                            } catch (e: IOException) {
+                                                Log.e(TAG, "Output write error: ${e.message}")
+                                            }
                                         }
                                     }
                                 }
@@ -324,8 +378,8 @@ class VaalVpnService : VpnService() {
             Log.e(TAG, "Unexpected error in UDP handler", e)
         } finally {
             Log.i(TAG, "UDP thread exiting")
-            if (isConnected) {
-                isConnected = false
+            if (isConnected.get()) {
+                isConnected.set(false)
                 broadcastStatus(this)
             }
         }
@@ -336,7 +390,7 @@ class VaalVpnService : VpnService() {
             val relaySocketAddr = InetSocketAddress(relayAddr, tcpPort)
             SocketChannel.open(relaySocketAddr).use { channel ->
                 tcpChannel = channel
-                channel.configureBlocking(false)
+                channel.configureBlocking(true)
                 
                 val header = ByteArray(HEADER_SIZE).apply {
                     System.arraycopy(sessionCode.toByteArray(), 0, this, 0, 6)
@@ -398,18 +452,23 @@ class VaalVpnService : VpnService() {
     ) {
         try {
             FileInputStream(vpnInterface.fileDescriptor).use { input ->
-                val buffer = ByteArray(4096)
+                val buffer = ByteArray(32768)
                 while (isRunning.get()) {
                     val bytesRead = input.read(buffer)
                     if (bytesRead == -1) break
                     if (bytesRead > 0) {
                         dest.write(ByteBuffer.wrap(buffer, 0, bytesRead))
-                        Log.v(TAG, "Forwarded $bytesRead bytes to relay (TCP)")
                     }
                 }
             }
         } catch (e: IOException) {
             if (isRunning.get()) Log.e(TAG, "TCP to relay error: ${e.message}", e)
+        } finally {
+            try {
+                dest.close()
+            } catch (e: IOException) {
+                Log.e(TAG, "Error closing TCP channel: ${e.message}")
+            }
         }
     }
 
@@ -419,7 +478,7 @@ class VaalVpnService : VpnService() {
     ) {
         try {
             FileOutputStream(vpnInterface.fileDescriptor).use { output ->
-                val buffer = ByteBuffer.allocate(4096)
+                val buffer = ByteBuffer.allocate(32768)
                 while (isRunning.get()) {
                     buffer.clear()
                     val bytesRead = source.read(buffer)
@@ -429,12 +488,17 @@ class VaalVpnService : VpnService() {
                         val data = ByteArray(buffer.remaining())
                         buffer.get(data)
                         output.write(data)
-                        Log.v(TAG, "Forwarded $bytesRead bytes from relay (TCP)")
                     }
                 }
             }
         } catch (e: IOException) {
             if (isRunning.get()) Log.e(TAG, "TCP from relay error: ${e.message}", e)
+        } finally {
+            try {
+                source.close()
+            } catch (e: IOException) {
+                Log.e(TAG, "Error closing TCP channel: ${e.message}")
+            }
         }
     }
 
@@ -443,7 +507,7 @@ class VaalVpnService : VpnService() {
         Log.i(TAG, "Stopping VPN service")
         isRunning.set(false)
         isActive = false
-        isConnected = false
+        isConnected.set(false)
         broadcastStatus(this)
 
         // Clear saved configuration
@@ -470,9 +534,9 @@ class VaalVpnService : VpnService() {
         
         // Wait for threads to finish
         try {
-            udpThread?.join(1000)
-            tcpThread?.join(1000)
-            heartbeatThread?.join(1000)
+            udpThread?.join(2000)
+            tcpThread?.join(2000)
+            heartbeatThread?.join(2000)
         } catch (e: InterruptedException) {
             Log.w(TAG, "Thread join interrupted", e)
         }

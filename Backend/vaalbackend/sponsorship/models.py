@@ -6,7 +6,7 @@ def generate_session_id():
     return uuid.uuid4().hex[:6].upper()
 
 def default_expiry():
-    return timezone.now() + timezone.timedelta(minutes=30)
+    return timezone.now() + timezone.timedelta(hours=2)  # Extended session time
 
 class ConnectionSession(models.Model):
     session_id = models.CharField(

@@ -10,6 +10,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('VaalLinkRelay')
+logger.setLevel(logging.DEBUG)
 
 class UdpRelay:
     def __init__(self, host='0.0.0.0', port=52000):
@@ -17,11 +18,13 @@ class UdpRelay:
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65535)
         self.sock.bind((host, port))
         self.sessions = defaultdict(lambda: {
             'host': None, 
             'client': None, 
-            'last_seen': time.time()
+            'last_seen': time.time(),
+            'last_heartbeat': time.time()
         })
         logger.info(f"UDP Relay running on {host}:{port}")
 
@@ -44,30 +47,38 @@ class UdpRelay:
 
     def run(self):
         while True:
-            data, addr = self.sock.recvfrom(65535)
-            if len(data) < 7:
-                continue
+            try:
+                data, addr = self.sock.recvfrom(65535)
+                if len(data) < 7:
+                    continue
+                    
+                session_id = data[:6].decode('utf-8', errors='ignore')
+                is_host = data[6] == 1
                 
-            session_id = data[:6].decode('utf-8', errors='ignore')
-            is_host = data[6] == 1
-            
-            session = self.sessions[session_id]
-            session['last_seen'] = time.time()
-            
-            if is_host:
-                session['host'] = addr
-                logger.info(f"Host registered for session: {session_id}")
-                self.sock.sendto(b'\x01', addr)  # Send ACK
-            else:
-                session['client'] = addr
-                logger.info(f"Client registered for session: {session_id}")
-                self.sock.sendto(b'\x01', addr)  # Send ACK
+                session = self.sessions[session_id]
+                session['last_seen'] = time.time()
                 
-            if session['host'] and session['client']:
-                if is_host and session['client']:
-                    self.sock.sendto(data[7:], session['client'])
-                elif not is_host and session['host']:
-                    self.sock.sendto(data[7:], session['host'])
+                if is_host:
+                    session['host'] = addr
+                    session['last_heartbeat'] = time.time()
+                    logger.debug(f"Host heartbeat for session: {session_id}")
+                    self.sock.sendto(b'\x01', addr)  # Send ACK
+                else:
+                    session['client'] = addr
+                    session['last_heartbeat'] = time.time()
+                    logger.debug(f"Client heartbeat for session: {session_id}")
+                    self.sock.sendto(b'\x01', addr)  # Send ACK
+                    
+                # Forward packets if both endpoints are registered
+                if session['host'] and session['client']:
+                    if is_host and session['client']:
+                        # Strip header and forward to client
+                        self.sock.sendto(data[7:], session['client'])
+                    elif not is_host and session['host']:
+                        # Strip header and forward to host
+                        self.sock.sendto(data[7:], session['host'])
+            except Exception as e:
+                logger.error(f"UDP processing error: {e}")
 
 class TcpRelay:
     def __init__(self, host='0.0.0.0', port=52001):
@@ -75,8 +86,9 @@ class TcpRelay:
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65535)
         self.sock.bind((host, port))
-        self.sock.listen(5)
+        self.sock.listen(100)
         self.sessions = {}
         logger.info(f"TCP Relay running on {host}:{port}")
 
@@ -85,50 +97,68 @@ class TcpRelay:
 
     def run(self):
         while True:
-            conn, addr = self.sock.accept()
-            threading.Thread(target=self.handle_client, args=(conn, addr)).start()
+            try:
+                conn, addr = self.sock.accept()
+                logger.debug(f"New TCP connection from {addr}")
+                threading.Thread(target=self.handle_client, args=(conn, addr)).start()
+            except Exception as e:
+                logger.error(f"TCP accept error: {e}")
 
     def handle_client(self, conn, addr):
         try:
+            # Receive and parse header
             header = conn.recv(7)
             if len(header) < 7:
+                logger.warning("Invalid TCP header length")
+                conn.close()
                 return
                 
             session_id = header[:6].decode('utf-8', errors='ignore')
             is_host = header[6] == 1
             
-            conn.sendall(b'\x01')  # Send ACK
+            # Send ACK
+            conn.sendall(b'\x01')
+            
+            logger.info(f"New {'host' if is_host else 'client'} for session: {session_id}")
             
             if session_id not in self.sessions:
                 self.sessions[session_id] = {'host': None, 'client': None}
                 
             if is_host:
                 self.sessions[session_id]['host'] = conn
-                logger.info(f"Host connected for session: {session_id}")
             else:
                 self.sessions[session_id]['client'] = conn
-                logger.info(f"Client connected for session: {session_id}")
                 
+            # Start forwarding if both endpoints connected
             if self.sessions[session_id]['host'] and self.sessions[session_id]['client']:
                 logger.info(f"Both endpoints connected for session: {session_id}")
                 self.pipe_connections(session_id)
+            else:
+                logger.info(f"Waiting for peer for session: {session_id}")
                 
         except Exception as e:
             logger.error(f"TCP connection error: {e}")
+            try:
+                conn.close()
+            except:
+                pass
 
     def pipe_connections(self, session_id):
         host_conn = self.sessions[session_id]['host']
         client_conn = self.sessions[session_id]['client']
         
-        def forward(src, dest):
+        def forward(src, dest, label):
             try:
                 while True:
-                    data = src.recv(4096)
+                    data = src.recv(65535)
                     if not data:
+                        logger.debug(f"{label} connection closed")
                         break
                     dest.sendall(data)
+            except ConnectionResetError:
+                logger.info(f"{label} connection reset")
             except Exception as e:
-                logger.error(f"Forwarding error: {e}")
+                logger.error(f"{label} forwarding error: {e}")
             finally:
                 try:
                     src.close()
@@ -141,10 +171,22 @@ class TcpRelay:
                 if session_id in self.sessions:
                     del self.sessions[session_id]
                 
-        threading.Thread(target=forward, args=(host_conn, client_conn), daemon=True).start()
-        threading.Thread(target=forward, args=(client_conn, host_conn), daemon=True).start()
+        # Start bidirectional forwarding
+        threading.Thread(
+            target=forward, 
+            args=(host_conn, client_conn, "Host->Client"), 
+            daemon=True
+        ).start()
+        
+        threading.Thread(
+            target=forward, 
+            args=(client_conn, host_conn, "Client->Host"), 
+            daemon=True
+        ).start()
 
 if __name__ == "__main__":
+    logger.info("Starting VaalLink Relay Servers")
+    
     udp_relay = UdpRelay(port=52000)
     tcp_relay = TcpRelay(port=52001)
     

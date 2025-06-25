@@ -10,7 +10,7 @@ import {
 } from '../services/vpnService';
 import axios from 'axios';
 
-const API_URL = 'http://192.168.0.137:8000/api/';
+const TEST_URL = 'https://www.google.com';
 
 const HostScreen = ({ navigation }) => {
   const [sessionInfo, setSessionInfo] = useState(null);
@@ -22,8 +22,19 @@ const HostScreen = ({ navigation }) => {
   
   const sessionInfoRef = useRef(null);
   const stopAttempted = useRef(false);
-  const validateIntervalRef = useRef(null);
   const vpnSubscriptionRef = useRef(null);
+
+  const testInternet = async () => {
+    try {
+      const response = await axios.get(TEST_URL, {
+        timeout: 5000,
+        headers: { 'Cache-Control': 'no-cache' }
+      });
+      return response.status === 200;
+    } catch (error) {
+      return false;
+    }
+  };
 
   useEffect(() => {
     const initSession = async () => {
@@ -49,18 +60,10 @@ const HostScreen = ({ navigation }) => {
         
         setStatusMessage('Verifying connection...');
         
-        const testConnection = async () => {
-          try {
-            await axios.get(`${API_URL}health/`, { timeout: 3000 });
-            return true;
-          } catch {
-            return false;
-          }
-        };
-        
+        // Verify internet connection
         let connected = false;
-        for (let i = 0; i < 3; i++) {
-          if (await testConnection()) {
+        for (let i = 0; i < 5; i++) {
+          if (await testInternet()) {
             connected = true;
             break;
           }
@@ -68,7 +71,7 @@ const HostScreen = ({ navigation }) => {
         }
         
         if (!connected) {
-          throw new Error('Cannot reach server after VPN activation');
+          throw new Error('Cannot reach internet after VPN activation');
         }
         
         setLoading(false);
@@ -94,25 +97,7 @@ const HostScreen = ({ navigation }) => {
       setVpnActive(active);
     });
     
-    validateIntervalRef.current = setInterval(async () => {
-      if (sessionInfoRef.current?.code) {
-        try {
-          const response = await axios.get(
-            `${API_URL}validate/${sessionInfoRef.current.code}/`,
-            { timeout: 5000 }
-          );
-          if (!response.data.active) {
-            setError('Session expired or canceled');
-            await handleStopSharing();
-          }
-        } catch (err) {
-          console.log('Validation error:', err);
-        }
-      }
-    }, 10000);
-    
     return () => {
-      clearInterval(validateIntervalRef.current);
       if (vpnSubscriptionRef.current) {
         vpnSubscriptionRef.current();
       }

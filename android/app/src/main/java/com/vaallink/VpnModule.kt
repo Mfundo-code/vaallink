@@ -4,7 +4,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.net.VpnService
+import android.net.VpnService  // ADD THIS IMPORT
+import android.app.Activity  // ADD THIS IMPORT
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -13,6 +14,7 @@ import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableMap
 import com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter
+import java.util.concurrent.atomic.AtomicBoolean
 
 class VpnModule(private val reactContext: ReactApplicationContext) : ReactContextBaseJavaModule(reactContext) {
     private val statusReceiver = object : BroadcastReceiver() {
@@ -51,9 +53,14 @@ class VpnModule(private val reactContext: ReactApplicationContext) : ReactContex
     @ReactMethod
     fun prepareVpn(promise: Promise) {
         try {
-            val intent = VpnService.prepare(reactContext)
+            // Use fully qualified name since we have a VpnService class
+            val intent = android.net.VpnService.prepare(reactContext)
             if (intent != null) {
-                currentActivity?.startActivityForResult(intent, VaalVpnService.VPN_REQUEST_CODE)
+                // Cast to Activity to resolve the type issue
+                (currentActivity as Activity?)?.startActivityForResult(
+                    intent, 
+                    VaalVpnService.VPN_REQUEST_CODE
+                )
                 promise.resolve(true)
             } else {
                 promise.resolve(true) // Already prepared
@@ -102,7 +109,7 @@ class VpnModule(private val reactContext: ReactApplicationContext) : ReactContex
         try {
             promise.resolve(Arguments.createMap().apply {
                 putBoolean("active", VaalVpnService.isActive)
-                putBoolean("connected", VaalVpnService.isConnected)
+                putBoolean("connected", VaalVpnService.isConnected.get())
             })
         } catch (e: Exception) {
             promise.reject("VPN_STATUS_ERROR", e.message)
