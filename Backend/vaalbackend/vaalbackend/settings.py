@@ -47,10 +47,17 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'vaalbackend.wsgi.application'
 
+DEBUG = False
+ALLOWED_HOSTS = ['164.68.125.31', 'localhost', 'yourdomain.com']
+
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'vaalbackend',
+        'USER': 'vaaluser',
+        'PASSWORD': 'your_secure_password',
+        'HOST': 'localhost',
+        'PORT': '',
     }
 }
 
