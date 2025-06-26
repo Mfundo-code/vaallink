@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_URL = 'http://192.168.0.137:8000/api/';
+const API_URL = 'http://164.68.125.31/api/';
 
 export const createSession = async (deviceId) => {
   try {

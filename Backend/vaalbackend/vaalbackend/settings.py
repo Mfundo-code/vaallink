@@ -55,9 +55,9 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'vaalbackend',
         'USER': 'vaaluser',
-        'PASSWORD': 'your_secure_password',
+        'PASSWORD': 'Mfundo@1995',
         'HOST': 'localhost',
-        'PORT': '',
+        'PORT': '5432',
     }
 }
 
@@ -70,6 +70,6 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # VaalLink settings
-RELAY_SERVER = "192.168.0.137"  # Your local IP
+RELAY_SERVER = "164.68.125.31"  # Your local IP
 RELAY_UDP_PORT = 52000  # Updated port
 RELAY_TCP_PORT = 52001  # Updated port
