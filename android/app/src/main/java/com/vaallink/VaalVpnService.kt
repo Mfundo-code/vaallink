@@ -18,7 +18,6 @@ import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 import java.nio.channels.SocketChannel
 import java.util.concurrent.atomic.AtomicBoolean
-import kotlin.math.min
 
 class VaalVpnService : VpnService() {
     companion object {
@@ -157,10 +156,15 @@ class VaalVpnService : VpnService() {
 
         if (role == "host") {
             builder.addAddress("10.8.0.1", 24)
+            try {
+                builder.addRoute(relayAddr, 32)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to add route for relayAddr: ${e.message}")
+            }
         } else {
             builder.addAddress("10.8.0.2", 24)
+            builder.addRoute("0.0.0.0", 0)
         }
-        builder.addRoute("0.0.0.0", 0)
 
         builder.addDnsServer("8.8.8.8")
         builder.addDnsServer("8.8.4.4")
@@ -231,12 +235,12 @@ class VaalVpnService : VpnService() {
                 // Send heartbeat packet
                 val heartbeat = ByteArray(HEADER_SIZE).apply {
                     val codeBytes = sessionCode.toByteArray()
-                    System.arraycopy(codeBytes, 0, this, 0, min(codeBytes.size, 6))
+                    System.arraycopy(codeBytes, 0, this, 0, codeBytes.size.coerceAtMost(6))
                     this[6] = if (role == "host") 1 else 0
                 }
                 udpChannel!!.write(ByteBuffer.wrap(heartbeat))
 
-                // Wait for ACK
+                // Wait for a genuine 1-byte ACK
                 ackBuffer.clear()
                 val startTime = System.currentTimeMillis()
                 var ackReceived = false
@@ -249,6 +253,7 @@ class VaalVpnService : VpnService() {
                             ackReceived = true
                             break
                         }
+                        // forwarded data—ignore
                         ackBuffer.clear()
                     }
                     Thread.sleep(100)
@@ -298,7 +303,8 @@ class VaalVpnService : VpnService() {
                             val sessionBytes = sessionCode.toByteArray()
                             val registration = ByteArray(sessionBytes.size + 1).apply {
                                 System.arraycopy(sessionBytes, 0, this, 0, sessionBytes.size)
-                                this[sessionBytes.size] = if (role == "host") 1 else 0
+                                this[sessionBytes.size] = if (role ==
+ "host") 1 else 0
                             }
                             channel.write(ByteBuffer.wrap(registration))
                             Log.d(TAG, "UDP registration sent for session $sessionCode")
@@ -326,7 +332,7 @@ class VaalVpnService : VpnService() {
 
                                 if (bytesRead > 0) {
                                     val packet = ByteArray(bytesRead + HEADER_SIZE).apply {
-                                        System.arraycopy(sessionCode.toByteArray(), 0, this, 0, min(6, sessionCode.toByteArray().size))
+                                        System.arraycopy(sessionCode.toByteArray(), 0, this, 0, 6)
                                         this[6] = if (role == "host") 1 else 0
                                         System.arraycopy(buffer.array(), 0, this, HEADER_SIZE, bytesRead)
                                     }
@@ -347,15 +353,17 @@ class VaalVpnService : VpnService() {
                                     -1
                                 }
 
-                                if (bytesReceived > HEADER_SIZE) {
-                                    try {
-                                        output.write(
-                                            buffer.array(),
-                                            HEADER_SIZE,
-                                            bytesReceived - HEADER_SIZE
-                                        )
-                                    } catch (e: IOException) {
-                                        Log.e(TAG, "Output write error: ${e.message}")
+                                if (bytesReceived > 0) {
+                                    if (bytesReceived >= HEADER_SIZE) {
+                                        try {
+                                            output.write(
+                                                buffer.array(),
+                                                HEADER_SIZE,
+                                                bytesReceived - HEADER_SIZE
+                                            )
+                                        } catch (e: IOException) {
+                                            Log.e(TAG, "Output write error: ${e.message}")
+                                        }
                                     }
                                 }
 
@@ -386,7 +394,7 @@ class VaalVpnService : VpnService() {
                 channel.configureBlocking(true)
 
                 val header = ByteArray(HEADER_SIZE).apply {
-                    System.arraycopy(sessionCode.toByteArray(), 0, this, 0, min(6, sessionCode.toByteArray().size))
+                    System.arraycopy(sessionCode.toByteArray(), 0, this, 0, 6)
                     this[6] = if (role == "host") 1 else 0
                 }
                 channel.write(ByteBuffer.wrap(header))
