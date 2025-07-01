@@ -1,15 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, TextInput, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, TextInput, StyleSheet } from 'react-native';
 import Button from '../components/Button';
 import { joinSession } from '../services/api';
-import { 
-  startVpnService, 
-  stopVpnService, 
-  listenForVpnStatus 
+import {
+  startVpnService,
+  stopVpnService,
+  listenForVpnStatus,
+  testInternet
 } from '../services/vpnService';
-import axios from 'axios';
-
-const TEST_URL = 'https://www.google.com';
 
 const ClientScreen = ({ navigation }) => {
   const [code, setCode] = useState('');
@@ -21,57 +19,29 @@ const ClientScreen = ({ navigation }) => {
   const [sessionInfo, setSessionInfo] = useState(null);
 
   useEffect(() => {
-    const unsubscribe = listenForVpnStatus((active) => {
+    const unsubscribe = listenForVpnStatus(active => {
       setVpnActive(active);
-      if (active) {
-        setConnectionStatus('connected');
-      } else {
-        setConnectionStatus('disconnected');
-      }
+      setConnectionStatus(active ? 'connected' : 'disconnected');
     });
-    
-    return () => {
-      unsubscribe();
-    };
+    return unsubscribe;
   }, []);
-
-  const testInternet = async () => {
-    try {
-      const response = await axios.get(TEST_URL, {
-        timeout: 5000,
-        headers: { 'Cache-Control': 'no-cache' }
-      });
-      return response.status === 200;
-    } catch (error) {
-      return false;
-    }
-  };
 
   const handleConnect = async () => {
     if (code.length !== 6) {
       setError('Code must be 6 characters');
       return;
     }
-    
     setLoading(true);
     setError('');
     setStatus('Connecting...');
     setConnectionStatus('connecting');
-    
     try {
-      // Generate random device ID
       const deviceId = Math.random().toString(36).substring(2, 10).toUpperCase();
       const response = await joinSession(code.toUpperCase(), deviceId);
-      
-      if (response.status !== 'success') {
-        throw new Error('Invalid session code or session expired');
-      }
-      
+      if (response.status !== 'success') throw new Error('Invalid session code or session expired');
       setSessionInfo(response);
       setStatus('Configuring VPN...');
       setConnectionStatus('configuring');
-      
-      // Start VPN service
       await startVpnService({
         role: 'client',
         relayServer: response.relay_server,
@@ -79,11 +49,8 @@ const ClientScreen = ({ navigation }) => {
         tcpPort: response.tcp_port,
         sessionCode: code.toUpperCase()
       });
-      
-      // Verify internet connection
       setStatus('Verifying connection...');
       let connected = false;
-      
       for (let i = 0; i < 5; i++) {
         if (await testInternet()) {
           connected = true;
@@ -91,7 +58,6 @@ const ClientScreen = ({ navigation }) => {
         }
         await new Promise(resolve => setTimeout(resolve, 2000));
       }
-      
       if (connected) {
         setStatus('Connected successfully!');
         setConnectionStatus('connected');
@@ -105,9 +71,7 @@ const ClientScreen = ({ navigation }) => {
       setConnectionStatus('error');
       try {
         await stopVpnService();
-      } catch (stopErr) {
-        console.log('Stop VPN error:', stopErr);
-      }
+      } catch {}
     } finally {
       setLoading(false);
     }
@@ -127,7 +91,7 @@ const ClientScreen = ({ navigation }) => {
   };
 
   const getStatusText = () => {
-    switch(connectionStatus) {
+    switch (connectionStatus) {
       case 'connecting': return 'Connecting to host...';
       case 'configuring': return 'Configuring network...';
       case 'connected': return 'Connected! Internet shared';
@@ -138,7 +102,7 @@ const ClientScreen = ({ navigation }) => {
   };
 
   const getStatusColor = () => {
-    switch(connectionStatus) {
+    switch (connectionStatus) {
       case 'connected': return '#4CAF50';
       case 'error': return '#F44336';
       case 'connecting':
@@ -151,12 +115,10 @@ const ClientScreen = ({ navigation }) => {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Connect to Internet</Text>
-      
       <View style={styles.statusContainer}>
         <View style={[styles.statusIndicator, { backgroundColor: getStatusColor() }]} />
         <Text style={styles.statusText}>{getStatusText()}</Text>
       </View>
-      
       {!vpnActive && (
         <>
           <Text style={styles.label}>Enter connection code:</Text>
@@ -169,21 +131,18 @@ const ClientScreen = ({ navigation }) => {
             maxLength={6}
             autoCapitalize="characters"
             editable={!loading}
-            autoFocus={true}
+            autoFocus
           />
         </>
       )}
-      
       {error ? <Text style={styles.error}>{error}</Text> : null}
       {status ? <Text style={styles.status}>{status}</Text> : null}
-      
       {sessionInfo && vpnActive && (
         <View style={styles.sessionInfo}>
           <Text style={styles.infoText}>Session: {sessionInfo.code}</Text>
           <Text style={styles.infoText}>Relay: {sessionInfo.relay_server}</Text>
         </View>
       )}
-      
       <View style={styles.buttonContainer}>
         {!vpnActive ? (
           <Button
@@ -285,17 +244,6 @@ const styles = StyleSheet.create({
   infoText: {
     fontSize: 14,
     color: '#2E7D32',
-    marginBottom: 5,
-  },
-  usageInfo: {
-    marginTop: 'auto',
-    padding: 15,
-    backgroundColor: '#F5F7FA',
-    borderRadius: 8,
-  },
-  usageText: {
-    fontSize: 14,
-    color: '#7F8C8D',
     marginBottom: 5,
   },
 });

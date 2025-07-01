@@ -69,13 +69,11 @@ class UdpRelay:
                     logger.debug(f"Client heartbeat for session: {session_id}")
                     self.sock.sendto(b'\x01', addr)  # Send ACK
                     
-                # Forward packets if both endpoints are registered
-                if session['host'] and session['client']:
+                # Forward packets if both endpoints are registered and it's a data packet
+                if len(data) > 7:
                     if is_host and session['client']:
-                        # Strip header and forward to client
                         self.sock.sendto(data[7:], session['client'])
                     elif not is_host and session['host']:
-                        # Strip header and forward to host
                         self.sock.sendto(data[7:], session['host'])
             except Exception as e:
                 logger.error(f"UDP processing error: {e}")
@@ -125,8 +123,14 @@ class TcpRelay:
                 self.sessions[session_id] = {'host': None, 'client': None}
                 
             if is_host:
+                if self.sessions[session_id]['host']:
+                    logger.warning(f"Closing existing host connection for {session_id}")
+                    self.sessions[session_id]['host'].close()
                 self.sessions[session_id]['host'] = conn
             else:
+                if self.sessions[session_id]['client']:
+                    logger.warning(f"Closing existing client connection for {session_id}")
+                    self.sessions[session_id]['client'].close()
                 self.sessions[session_id]['client'] = conn
                 
             # Start forwarding if both endpoints connected

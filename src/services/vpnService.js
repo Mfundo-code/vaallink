@@ -17,7 +17,6 @@ export const startVpnService = async (config) => {
   try {
     await prepareVpnService();
     
-    // Add timeout to VPN start
     const timeoutPromise = new Promise((_, reject) => 
       setTimeout(() => reject(new Error('VPN start timed out')), 15000)
     );
@@ -66,7 +65,6 @@ export const listenForVpnStatus = (callback) => {
     callback(status.active && status.connected);
   });
   
-  // Add periodic check
   const interval = setInterval(async () => {
     try {
       const status = await getVpnStatus();
@@ -80,4 +78,13 @@ export const listenForVpnStatus = (callback) => {
     subscription.remove();
     clearInterval(interval);
   };
+};
+
+export const testInternet = async () => {
+  try {
+    const response = await fetch('http://clients3.google.com/generate_204');
+    return response.status === 204;
+  } catch (error) {
+    return false;
+  }
 };

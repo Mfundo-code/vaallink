@@ -6,11 +6,9 @@ import {
   prepareVpnService,
   startVpnService, 
   stopVpnService, 
-  listenForVpnStatus
+  listenForVpnStatus,
+  testInternet
 } from '../services/vpnService';
-import axios from 'axios';
-
-const TEST_URL = 'https://www.google.com';
 
 const HostScreen = ({ navigation }) => {
   const [sessionInfo, setSessionInfo] = useState(null);
@@ -23,18 +21,6 @@ const HostScreen = ({ navigation }) => {
   const sessionInfoRef = useRef(null);
   const stopAttempted = useRef(false);
   const vpnSubscriptionRef = useRef(null);
-
-  const testInternet = async () => {
-    try {
-      const response = await axios.get(TEST_URL, {
-        timeout: 5000,
-        headers: { 'Cache-Control': 'no-cache' }
-      });
-      return response.status === 200;
-    } catch (error) {
-      return false;
-    }
-  };
 
   useEffect(() => {
     const initSession = async () => {
@@ -60,7 +46,6 @@ const HostScreen = ({ navigation }) => {
         
         setStatusMessage('Verifying connection...');
         
-        // Verify internet connection
         let connected = false;
         for (let i = 0; i < 5; i++) {
           if (await testInternet()) {
